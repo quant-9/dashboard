@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class MetricsEngine:
     def __init__(self, risk_free_rate: float = 0.0) -> None:
+        """Initialize metrics engine with risk-free rate.
+        
+        Args:
+            risk_free_rate: Annual risk-free rate for Sharpe/Sortino calculations
+        """
         self.risk_free = risk_free_rate
 
     def _ensure_series(self, pnl: pd.Series) -> pd.Series:
@@ -25,7 +34,10 @@ class MetricsEngine:
         losses = -series[series < 0].sum()
         
         if losses == 0:
-            return np.inf if gains > 0 else np.nan
+            result = np.inf if gains > 0 else np.nan
+            if np.isinf(result):
+                logger.info("Profit factor is infinite (no losses)")
+            return result
         return gains / losses
 
     def sharpe(self, returns: pd.Series, trading_days: int = None) -> float:

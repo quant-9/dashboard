@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-from matplotlib import container
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -30,6 +28,16 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QTextEdit,
 )
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+INSTRUMENTS = ["NQ", "GC", "ES", "YM", "RTY", "CL", "ZB"]
+ROLLING_WINDOW_DEFAULT = 20
+MIN_SESSIONS_FOR_ROLLING = 10
+ROLLING_WINDOW_MIN_DIVISOR = 2
+CSV_EXPORT_DEFAULT = "sessions.csv"
 
 from database import Database
 from metrics_engine import MetricsEngine
@@ -78,8 +86,7 @@ class EditSessionDialog(QDialog):
         self.date = QDateEdit()
         self.date.setDate(QDate.fromString(self.session_row['trade_date'], 'yyyy-MM-dd'))
         
-        self.instrument = QComboBox()
-        self.instrument.addItems(["NQ", "GC", "ES"])
+        self.instrument.addItems(INSTRUMENTS)
         self.instrument.setCurrentText(self.session_row['instrument'])
         
         self.net = QLineEdit(str(self.session_row['net_pnl']))
@@ -159,7 +166,7 @@ class SessionForm(QWidget):
         self.date.setButtonSymbols(QDateEdit.ButtonSymbols.UpDownArrows)
         
         self.instrument = QComboBox()
-        self.instrument.addItems(["NQ", "GC", "ES"])
+        self.instrument.addItems(INSTRUMENTS)
         
         self.net = QLineEdit()
         self.trades = QLineEdit()
@@ -589,7 +596,9 @@ class MainWindow(QWidget):
         
         equity_layout = QFormLayout()
         self.starting_equity_input = QLineEdit(str(self.settings.starting_equity))
+        self.risk_free_rate_input = QLineEdit(str(self.settings.risk_free_rate * 100))  # Convert to percentage for display
         equity_layout.addRow("Starting Equity ($)", self.starting_equity_input)
+        equity_layout.addRow("Risk-Free Rate (%)", self.risk_free_rate_input)
         
         save_settings_btn = QPushButton("Save Settings")
         save_settings_btn.clicked.connect(self.save_settings)
@@ -610,23 +619,34 @@ class MainWindow(QWidget):
     def save_settings(self) -> None:
         try:
             starting_equity = float(self.starting_equity_input.text())
+            risk_free_rate = float(self.risk_free_rate_input.text())
+            
             if starting_equity <= 0:
                 QMessageBox.warning(self, "Invalid", "Starting equity must be positive.")
                 return
             
+            if risk_free_rate < 0 or risk_free_rate > 100:
+                QMessageBox.warning(self, "Invalid", "Risk-free rate must be between 0 and 100.")
+                return
+            
             self.settings.starting_equity = starting_equity
+            self.settings.risk_free_rate = risk_free_rate / 100  # Convert percentage to decimal
             self.db.save_settings(self.settings)
+            
+            # Update metrics engine with new risk-free rate
+            self.metrics = MetricsEngine(risk_free_rate=self.settings.risk_free_rate)
             self.recalculate_all_metrics()
+            
             QMessageBox.information(self, "Saved", "Settings saved. Metrics recalculated.")
         except ValueError:
-            QMessageBox.warning(self, "Invalid", "Please enter a valid number for starting equity.")
+            QMessageBox.warning(self, "Invalid", "Please enter valid numbers for settings.")
 
     def export_csv(self) -> None:
         df = self._sessions_df()
         if df.empty:
             QMessageBox.information(self, "Export", "No data to export.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "sessions.csv", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", CSV_EXPORT_DEFAULT, "CSV Files (*.csv)")
         if not path:
             return
         df.to_csv(path, index=False)
@@ -715,22 +735,26 @@ class MainWindow(QWidget):
         if df.empty:
             layout.addWidget(QLabel("No data yet."))
         else:
-            equity = self._get_equity_curve(df)
-            full_range = pd.date_range(equity.index.min(), equity.index.max(), freq='D')
-            equity = equity.reindex(full_range, method='ffill')
-            
-            fig = Figure(figsize=(10, 5))
-            ax = fig.add_subplot(111)
-            ax.plot(equity.index, equity.values, color="#4c9aff", linewidth=2)
-            ax.set_title("Equity Curve", fontsize=14, fontweight='bold')
-            ax.set_xlabel("Date")
-            ax.set_ylabel("Equity ($)")
-            ax.grid(True, alpha=0.3)
-            ax.ticklabel_format(style="plain", axis="y")
-            ax.axhline(y=self.settings.starting_equity, color='gray', linestyle='--', alpha=0.5, label='Starting Equity')
-            ax.legend()
-            
-            layout.addWidget(FigureCanvas(fig))
+            try:
+                equity = self._get_equity_curve(df)
+                full_range = pd.date_range(equity.index.min(), equity.index.max(), freq='D')
+                equity = equity.reindex(full_range, method='ffill')
+                
+                fig = Figure(figsize=(10, 5))
+                ax = fig.add_subplot(111)
+                ax.plot(equity.index, equity.values, color="#4c9aff", linewidth=2)
+                ax.set_title("Equity Curve", fontsize=14, fontweight='bold')
+                ax.set_xlabel("Date")
+                ax.set_ylabel("Equity ($)")
+                ax.grid(True, alpha=0.3)
+                ax.ticklabel_format(style="plain", axis="y")
+                ax.axhline(y=self.settings.starting_equity, color='gray', linestyle='--', alpha=0.5, label='Starting Equity')
+                ax.legend()
+                
+                layout.addWidget(FigureCanvas(fig))
+            except Exception as e:
+                logger.error(f"Error rendering equity curve: {e}")
+                layout.addWidget(QLabel(f"Error rendering chart: {str(e)}"))
         
         equity_container.setLayout(layout)
         self.equity_view.setWidget(equity_container)
@@ -804,12 +828,11 @@ class MainWindow(QWidget):
         
         if df.empty:
             layout.addWidget(QLabel("No data yet."))
-        elif len(df) < 10:
-            layout.addWidget(QLabel("Need at least 10 sessions for rolling metrics."))
+        elif len(df) < MIN_SESSIONS_FOR_ROLLING:
+            layout.addWidget(QLabel(f"Need at least {MIN_SESSIONS_FOR_ROLLING} sessions for rolling metrics."))
         else:
             returns = pd.Series(df["net_pnl"].values)
-            window = min(20, len(returns) // 2)
-            
+            window = min(ROLLING_WINDOW_DEFAULT, len(returns) // ROLLING_WINDOW_MIN_DIVISOR)
             rolling_wr = returns.rolling(window=window).apply(
                 lambda x: self.metrics.win_rate(pd.Series(x)), raw=False
             )

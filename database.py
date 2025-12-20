@@ -10,6 +10,10 @@ from models import DerivedMetrics, SessionRecord, TradeSummary, AppSettings
 
 class Database:
     def __init__(self, db_path: Path | str = "trading_dashboard.db") -> None:
+        """Initialize database connection and create schema if needed.
+        Args:
+            db_path: Path to SQLite database file
+        """
         self.db_path = Path(db_path)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
@@ -69,6 +73,9 @@ class Database:
                 timestamp TEXT,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+            
+            CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_session ON trades(session_id);
             
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -263,3 +270,12 @@ class Database:
 
     def close(self) -> None:
         self.conn.close()
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures connection is closed."""
+        self.close()
+        return False
