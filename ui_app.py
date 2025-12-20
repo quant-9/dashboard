@@ -68,18 +68,18 @@ class Sidebar(QWidget):
         layout.addWidget(title)
         
         icons = {
-            "Log Trade",
-            "Equity",
-            "Drawdown",
-            "PnL Distribution",
-            "Rolling Metrics",
-            "Statistics",
-            "History",
-            "Settings"
+            "Log Trade": "📝",
+            "Equity": "📈",
+            "Drawdown": "📉",
+            "PnL Distribution": "📊",
+            "Rolling Metrics": "🔄",
+            "Statistics": "📐",
+            "History": "📚",
+            "Settings": "⚙️"
         }
         
-        for label in icons.keys():
-            btn = QPushButton(f"{icons[label]}  {label}")
+        for label, icon in icons.items():  # Changed from icons.keys() to icons.items()
+            btn = QPushButton(f"{icon}  {label}")
             btn.setCheckable(True)
             btn.setMinimumHeight(44)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -98,13 +98,6 @@ class Sidebar(QWidget):
             }
         """)
         self.activate("Log Trade")
-
-    def activate(self, name: str) -> None:
-        for label, btn in self.buttons.items():
-            btn.setChecked(label == name)
-        self.parent().on_nav(name)
-        if hasattr(self.parent(), 'update_status_bar'):
-            self.parent().update_status_bar()
 
 
 class EditSessionDialog(QDialog):
