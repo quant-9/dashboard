@@ -38,7 +38,8 @@ ROLLING_WINDOW_DEFAULT = 20
 MIN_SESSIONS_FOR_ROLLING = 10
 ROLLING_WINDOW_MIN_DIVISOR = 2
 CSV_EXPORT_DEFAULT = "sessions.csv"
-
+from PyQt6.QtCore import QTimer, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QFont
 from database import Database
 from metrics_engine import MetricsEngine
 from models import DerivedMetrics, SessionRecord, AppSettings
@@ -49,26 +50,61 @@ class Sidebar(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setContentsMargins(12, 16, 12, 16)
+        layout.setSpacing(8)
         self.buttons = {}
         
-        for label in ["Log Trade", "Equity", "Drawdown", "PnL Distribution", 
-                      "Rolling Metrics", "Statistics", "History", "Settings"]:
-            btn = QPushButton(label)
+        # Add logo/title
+        title = QLabel("Trading Analytics")
+        title.setStyleSheet("""
+            QLabel {
+                font-size: 16px;
+                font-weight: 700;
+                color: #6366f1;
+                padding: 12px 8px;
+                margin-bottom: 8px;
+            }
+        """)
+        layout.addWidget(title)
+        
+        icons = {
+            "Log Trade",
+            "Equity",
+            "Drawdown",
+            "PnL Distribution",
+            "Rolling Metrics",
+            "Statistics",
+            "History",
+            "Settings"
+        }
+        
+        for label in icons.keys():
+            btn = QPushButton(f"{icons[label]}  {label}")
             btn.setCheckable(True)
-            btn.setMinimumHeight(40)
+            btn.setMinimumHeight(44)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, name=label: self.activate(name))
             layout.addWidget(btn)
             self.buttons[label] = btn
         
         layout.addStretch()
         self.setLayout(layout)
-        self.setFixedWidth(170)
+        self.setFixedWidth(220)
+        self.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #0f1419, stop:1 #0a0e1a);
+                border-right: 1px solid #2d3748;
+            }
+        """)
         self.activate("Log Trade")
 
     def activate(self, name: str) -> None:
         for label, btn in self.buttons.items():
             btn.setChecked(label == name)
         self.parent().on_nav(name)
+        if hasattr(self.parent(), 'update_status_bar'):
+            self.parent().update_status_bar()
 
 
 class EditSessionDialog(QDialog):
@@ -79,53 +115,193 @@ class EditSessionDialog(QDialog):
         self.setModal(True)
         self._build_ui()
         
-    def _build_ui(self):
-        layout = QVBoxLayout()
-        form = QFormLayout()
-        
-        self.date = QDateEdit()
-        self.date.setDate(QDate.fromString(self.session_row['trade_date'], 'yyyy-MM-dd'))
-        
-        self.instrument = QComboBox()
-        self.instrument.addItems(INSTRUMENTS)
-        self.instrument.setCurrentText(self.session_row['instrument'])
-        
-        self.net = QLineEdit(str(self.session_row['net_pnl']))
-        self.trades = QLineEdit(str(self.session_row['trades']))
-        self.wins = QLineEdit(str(self.session_row['wins']))
-        self.losses = QLineEdit(str(self.session_row['losses']))
-        self.avg_risk = QLineEdit(str(self.session_row['avg_risk']))
-        self.avg_reward = QLineEdit(str(self.session_row['avg_reward']))
-        self.trims = QLineEdit(str(self.session_row['trims']))
-        self.largest_win = QLineEdit(str(self.session_row['largest_win']))
-        self.largest_loss = QLineEdit(str(self.session_row['largest_loss']))
-        
-        self.notes = QTextEdit()
-        self.notes.setPlainText(self.session_row.get('notes', '') or '')
-        self.notes.setMaximumHeight(80)
-        
-        form.addRow("Date", self.date)
-        form.addRow("Instrument", self.instrument)
-        form.addRow("Net PnL", self.net)
-        form.addRow("Trades", self.trades)
-        form.addRow("Wins", self.wins)
-        form.addRow("Losses", self.losses)
-        form.addRow("Avg Risk", self.avg_risk)
-        form.addRow("Avg Reward", self.avg_reward)
-        form.addRow("Trims", self.trims)
-        form.addRow("Largest Win", self.largest_win)
-        form.addRow("Largest Loss", self.largest_loss)
-        form.addRow("Notes", self.notes)
-        
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
+def _build_ui(self):
+    # Main container with card styling
+    main_layout = QVBoxLayout()
+    main_layout.setContentsMargins(0, 0, 0, 0)
+    
+    # Title section
+    title_widget = QWidget()
+    title_widget.setStyleSheet("""
+        QWidget {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                        stop:0 #4f46e5, stop:1 #6366f1);
+            border-radius: 0;
+        }
+    """)
+    title_layout = QVBoxLayout()
+    title_layout.setContentsMargins(24, 20, 24, 20)
+    
+    title = QLabel("✏️ Edit Trading Session")
+    title.setStyleSheet("""
+        QLabel {
+            font-size: 20px;
+            font-weight: 700;
+            color: white;
+        }
+    """)
+    subtitle = QLabel("Update session details below")
+    subtitle.setStyleSheet("""
+        QLabel {
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.8);
+            margin-top: 4px;
+        }
+    """)
+    title_layout.addWidget(title)
+    title_layout.addWidget(subtitle)
+    title_widget.setLayout(title_layout)
+    
+    # Form section
+    form_widget = QWidget()
+    form_widget.setStyleSheet("""
+        QWidget {
+            background-color: #151b2e;
+        }
+    """)
+    form_layout = QVBoxLayout()
+    form_layout.setContentsMargins(24, 24, 24, 24)
+    form_layout.setSpacing(16)
+    
+    form = QFormLayout()
+    form.setSpacing(12)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+    
+    # Style for labels
+    label_style = """
+        QLabel {
+            font-weight: 500;
+            color: #9ca3af;
+            font-size: 12px;
+        }
+    """
+    
+    self.date = QDateEdit()
+    self.date.setDate(QDate.fromString(self.session_row['trade_date'], 'yyyy-MM-dd'))
+    self.date.setCalendarPopup(True)
+    
+    self.instrument = QComboBox()
+    self.instrument.addItems(INSTRUMENTS)
+    self.instrument.setCurrentText(self.session_row['instrument'])
+    
+    self.net = QLineEdit(str(self.session_row['net_pnl']))
+    self.net.setPlaceholderText("e.g., 1250.50")
+    
+    self.trades = QLineEdit(str(self.session_row['trades']))
+    self.trades.setPlaceholderText("Total number of trades")
+    
+    self.wins = QLineEdit(str(self.session_row['wins']))
+    self.wins.setPlaceholderText("Number of winning trades")
+    
+    self.losses = QLineEdit(str(self.session_row['losses']))
+    self.losses.setPlaceholderText("Number of losing trades")
+    
+    self.avg_risk = QLineEdit(str(self.session_row['avg_risk']))
+    self.avg_risk.setPlaceholderText("Average risk per trade")
+    
+    self.avg_reward = QLineEdit(str(self.session_row['avg_reward']))
+    self.avg_reward.setPlaceholderText("Average reward per trade")
+    
+    self.trims = QLineEdit(str(self.session_row['trims']))
+    self.trims.setPlaceholderText("Number of partial exits")
+    
+    self.largest_win = QLineEdit(str(self.session_row['largest_win']))
+    self.largest_win.setPlaceholderText("Best trade of the session")
+    
+    self.largest_loss = QLineEdit(str(self.session_row['largest_loss']))
+    self.largest_loss.setPlaceholderText("Worst trade of the session")
+    
+    self.notes = QTextEdit()
+    self.notes.setPlainText(self.session_row.get('notes', '') or '')
+    self.notes.setMaximumHeight(100)
+    self.notes.setPlaceholderText("Add notes about market conditions, mistakes, or lessons learned...")
+    
+    # Create labels with styling
+    def create_label(text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(label_style)
+        return lbl
+    
+    form.addRow(create_label("Date:"), self.date)
+    form.addRow(create_label("Instrument:"), self.instrument)
+    form.addRow(create_label("Net P&L ($):"), self.net)
+    form.addRow(create_label("Trades:"), self.trades)
+    form.addRow(create_label("Wins:"), self.wins)
+    form.addRow(create_label("Losses:"), self.losses)
+    form.addRow(create_label("Avg Risk ($):"), self.avg_risk)
+    form.addRow(create_label("Avg Reward ($):"), self.avg_reward)
+    form.addRow(create_label("Trims:"), self.trims)
+    form.addRow(create_label("Largest Win ($):"), self.largest_win)
+    form.addRow(create_label("Largest Loss ($):"), self.largest_loss)
+    form.addRow(create_label("Notes:"), self.notes)
+    
+    form_layout.addLayout(form)
+    form_widget.setLayout(form_layout)
+    
+    # Button section
+    button_widget = QWidget()
+    button_widget.setStyleSheet("""
+        QWidget {
+            background-color: #0f1419;
+            border-top: 1px solid #2d3748;
+        }
+    """)
+    button_layout = QHBoxLayout()
+    button_layout.setContentsMargins(24, 16, 24, 16)
+    button_layout.addStretch()
+    
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #374151;
+            color: #e8eaf6;
+            padding: 10px 24px;
+            border-radius: 6px;
+            border: 1px solid #4b5563;
+            font-weight: 500;
+            min-width: 100px;
+        }
+        QPushButton:hover {
+            background-color: #4b5563;
+        }
+    """)
+    cancel_btn.clicked.connect(self.reject)
+    
+    save_btn = QPushButton("💾 Save Changes")
+    save_btn.setStyleSheet("""
+        QPushButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                        stop:0 #6366f1, stop:1 #4f46e5);
+            color: white;
+            padding: 10px 24px;
+            border-radius: 6px;
+            border: none;
+            font-weight: 600;
+            min-width: 120px;
+        }
+        QPushButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                        stop:0 #7c3aed, stop:1 #6366f1);
+        }
+        QPushButton:pressed {
+            background-color: #4338ca;
+        }
+    """)
+    save_btn.clicked.connect(self.accept)
+    save_btn.setDefault(True)
+    
+    button_layout.addWidget(cancel_btn)
+    button_layout.addWidget(save_btn)
+    button_widget.setLayout(button_layout)
+    
+    # Assemble everything
+    main_layout.addWidget(title_widget)
+    main_layout.addWidget(form_widget)
+    main_layout.addWidget(button_widget)
+    
+    self.setLayout(main_layout)
+    self.setMinimumWidth(500)
+    self.setMinimumHeight(650)
     
     def get_data(self):
         return {
@@ -318,33 +494,113 @@ class MainWindow(QWidget):
         self.setWindowTitle("Trading Analytics Dashboard")
         self.setStyleSheet(
             """
-            QWidget { background-color: #050608; color: #e5e5e5; font-size: 13px; font-family: 'Menlo', 'Consolas', monospace; }
+            QWidget { 
+                background-color: #0a0e1a; 
+                color: #e8eaf6; 
+                font-size: 13px; 
+                font-family: 'SF Pro Display', 'Segoe UI', 'Roboto', sans-serif;
+            }
             QLineEdit, QDateEdit, QComboBox, QTextEdit {
-                background-color: #101218;
-                border: 1px solid #2b2f3a;
-                border-radius: 0;
-                padding: 4px 6px;
+                background-color: #151b2e;
+                border: 1px solid #2d3748;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #e8eaf6;
             }
-            QListWidget { background-color: #050608; border: 1px solid #2b2f3a; }
+            QLineEdit:focus, QDateEdit:focus, QComboBox:focus, QTextEdit:focus {
+                border: 1px solid #4f46e5;
+                background-color: #1a2035;
+            }
+            QListWidget { 
+                background-color: #0f1419; 
+                border: 1px solid #2d3748;
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-radius: 4px;
+                margin: 2px 0;
+            }
+            QListWidget::item:hover {
+                background-color: #1a2035;
+            }
+            QListWidget::item:selected {
+                background-color: #4f46e5;
+                color: white;
+            }
             QPushButton {
-                background-color: #1b1f2a;
-                color: #e5e5e5;
-                padding: 6px 10px;
-                border-radius: 0;
-                border: 1px solid #2b2f3a;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #2d3748, stop:1 #1a202c);
+                color: #e8eaf6;
+                padding: 10px 16px;
+                border-radius: 6px;
+                border: 1px solid #374151;
+                font-weight: 500;
             }
-            QPushButton:hover { background-color: #242938; }
+            QPushButton:hover { 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #374151, stop:1 #2d3748);
+                border: 1px solid #4f46e5;
+            }
+            QPushButton:pressed {
+                background-color: #1a202c;
+            }
             QPushButton:checked {
-                background-color: #003b46;
-                border-color: #00ff7f;
-                color: #00ff7f;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #6366f1, stop:1 #4f46e5);
+                border-color: #818cf8;
+                color: white;
+                font-weight: 600;
             }
-            QLabel { color: #e5e5e5; }
+            QLabel { 
+                color: #e8eaf6; 
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QComboBox::drop-down {
+                border: none;
+                padding-right: 8px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 5px solid #e8eaf6;
+                margin-right: 8px;
+            }
             """
         )
         self._build_layout()
         if len(self.db.fetch_sessions()) > 0:
             self.recalculate_all_metrics()
+        self.statusBar = QLabel()
+        self.statusBar.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                            stop:0 #1a202c, stop:1 #0f1419);
+                padding: 8px 16px;
+                border-top: 1px solid #2d3748;
+                font-size: 11px;
+                color: #9ca3af;
+            }
+        """)
+        self.update_status_bar()
+        def update_status_bar(self) -> None:
+            df = self._sessions_df()
+            if df.empty:
+                self.statusBar.setText("📊 No sessions logged yet")
+            else:
+                total_pnl = df["net_pnl"].sum()
+                sessions = len(df)
+                win_rate = (df["wins"].sum() / df["trades"].sum() * 100) if df["trades"].sum() > 0 else 0
+                pnl_color = "🟢" if total_pnl > 0 else "🔴"
+                self.statusBar.setText(
+                    f"📊 {sessions} Sessions  |  {pnl_color} ${total_pnl:,.2f} Total P&L  |  "
+                    f"🎯 {win_rate:.1f}% Win Rate  |  💰 ${self.settings.starting_equity:,.0f} Starting Equity"
+                )
 
     def closeEvent(self, event):
         self.db.close()
@@ -399,6 +655,21 @@ class MainWindow(QWidget):
         layout.addWidget(Sidebar(self))
         layout.addWidget(self.stack, stretch=1)
         self.setLayout(layout)
+        layout = QHBoxLayout()
+        layout.addWidget(Sidebar(self))
+        layout.addWidget(self.stack, stretch=1)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(layout)
+        main_layout.addWidget(self.statusBar)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        container = QWidget()
+        container.setLayout(main_layout)
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(container)
+        self.layout().setContentsMargins(0, 0, 0, 0)
 
     def on_nav(self, name: str) -> None:
         mapping = {
@@ -728,37 +999,56 @@ class MainWindow(QWidget):
         
         QMessageBox.information(self, "Import", msg)
 
-    def render_equity(self) -> None:
-        df = self._sessions_df()
-        equity_container = QWidget()
-        layout = QVBoxLayout()
-        
-        if df.empty:
-            layout.addWidget(QLabel("No data yet."))
-        else:
-            try:
-                equity = self._get_equity_curve(df)
-                full_range = pd.date_range(equity.index.min(), equity.index.max(), freq='D')
-                equity = equity.reindex(full_range, method='ffill')
-                
-                fig = Figure(figsize=(10, 5))
-                ax = fig.add_subplot(111)
-                ax.plot(equity.index, equity.values, color="#4c9aff", linewidth=2)
-                ax.set_title("Equity Curve", fontsize=14, fontweight='bold')
-                ax.set_xlabel("Date")
-                ax.set_ylabel("Equity ($)")
-                ax.grid(True, alpha=0.3)
-                ax.ticklabel_format(style="plain", axis="y")
-                ax.axhline(y=self.settings.starting_equity, color='gray', linestyle='--', alpha=0.5, label='Starting Equity')
-                ax.legend()
-                
-                layout.addWidget(FigureCanvas(fig))
-            except Exception as e:
-                logger.error(f"Error rendering equity curve: {e}")
-                layout.addWidget(QLabel(f"Error rendering chart: {str(e)}"))
-        
-        equity_container.setLayout(layout)
-        self.equity_view.setWidget(equity_container)
+def render_equity(self) -> None:
+    df = self._sessions_df()
+    equity_container = QWidget()
+    layout = QVBoxLayout()
+    
+    if df.empty:
+        layout.addWidget(QLabel("No data yet."))
+    else:
+        try:
+            equity = self._get_equity_curve(df)
+            full_range = pd.date_range(equity.index.min(), equity.index.max(), freq='D')
+            equity = equity.reindex(full_range, method='ffill')
+            
+            # Modern chart styling
+            fig = Figure(figsize=(10, 5), facecolor='#0a0e1a')
+            ax = fig.add_subplot(111, facecolor='#0f1419')
+            ax.plot(equity.index, equity.values, color="#6366f1", linewidth=2.5, 
+                    label='Equity Curve', alpha=0.9)
+            
+            # Add gradient fills - green above starting equity, red below
+            ax.fill_between(equity.index, self.settings.starting_equity, equity.values,
+                            where=(equity.values >= self.settings.starting_equity),
+                            alpha=0.2, color='#10b981', interpolate=True)
+            ax.fill_between(equity.index, self.settings.starting_equity, equity.values,
+                            where=(equity.values < self.settings.starting_equity),
+                            alpha=0.2, color='#ef4444', interpolate=True)
+            
+            ax.set_title("Equity Curve", fontsize=14, fontweight='bold', color='#e8eaf6')
+            ax.set_xlabel("Date", color='#9ca3af')
+            ax.set_ylabel("Equity ($)", color='#9ca3af')
+            ax.grid(True, alpha=0.15, color='#2d3748')
+            ax.ticklabel_format(style="plain", axis="y")
+            ax.tick_params(colors='#9ca3af')
+            ax.axhline(y=self.settings.starting_equity, color='#6b7280', linestyle='--', 
+                      alpha=0.6, linewidth=1.5, label='Starting Equity')
+            ax.legend(facecolor='#151b2e', edgecolor='#2d3748', labelcolor='#e8eaf6')
+            
+            # Remove top and right spines for cleaner look
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['left'].set_color('#2d3748')
+            ax.spines['bottom'].set_color('#2d3748')
+            
+            layout.addWidget(FigureCanvas(fig))
+        except Exception as e:
+            logger.error(f"Error rendering equity curve: {e}")
+            layout.addWidget(QLabel(f"Error rendering chart: {str(e)}"))
+    
+    equity_container.setLayout(layout)
+    self.equity_view.setWidget(equity_container)
 
     def render_drawdown(self) -> None:
         df = self._sessions_df()
