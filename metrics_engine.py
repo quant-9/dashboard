@@ -36,7 +36,7 @@ class MetricsEngine:
         if losses == 0:
             result = np.inf if gains > 0 else np.nan
             if np.isinf(result):
-                logger.info("Profit factor is infinite (no losses)")
+                logger.debug("Profit factor is infinite (no losses)")
             return result
         return gains / losses
 

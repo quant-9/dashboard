@@ -86,6 +86,7 @@ class EditSessionDialog(QDialog):
         self.date = QDateEdit()
         self.date.setDate(QDate.fromString(self.session_row['trade_date'], 'yyyy-MM-dd'))
         
+        self.instrument = QComboBox()
         self.instrument.addItems(INSTRUMENTS)
         self.instrument.setCurrentText(self.session_row['instrument'])
         
