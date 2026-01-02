@@ -21,6 +21,8 @@ class Database:
 
     def _create_schema(self) -> None:
         cur = self.conn.cursor()
+        
+        # Create tables if they don't exist
         cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -29,6 +31,14 @@ class Database:
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
                 instrument TEXT NOT NULL,
+                direction TEXT DEFAULT 'Long',
+                contracts INTEGER DEFAULT 2,
+                entry_price REAL DEFAULT 0,
+                stop_points REAL DEFAULT 10,
+                trim1_points REAL DEFAULT 50,
+                trim2_points REAL DEFAULT 100,
+                trim1_hit BOOLEAN DEFAULT 0,
+                trim2_hit BOOLEAN DEFAULT 0,
                 market_regime TEXT,
                 notes TEXT,
                 gross_pnl REAL NOT NULL,
@@ -39,11 +49,11 @@ class Database:
                 trades INTEGER NOT NULL,
                 wins INTEGER NOT NULL,
                 losses INTEGER NOT NULL,
+                breakeven_trades INTEGER DEFAULT 0,
                 win_rate REAL NOT NULL,
                 avg_risk REAL NOT NULL,
                 avg_reward REAL NOT NULL,
                 rr_ratio REAL NOT NULL,
-                trims INTEGER NOT NULL,
                 largest_win REAL NOT NULL,
                 largest_loss REAL NOT NULL
             );
@@ -83,23 +93,61 @@ class Database:
             );
             """
         )
+        
+        # Migration: Add new columns if they don't exist (for existing databases)
+        cur.execute("PRAGMA table_info(sessions)")
+        columns = [row['name'] for row in cur.fetchall()]
+        
+        new_columns = {
+            'direction': "TEXT DEFAULT 'Long'",
+            'contracts': "INTEGER DEFAULT 2",
+            'entry_price': "REAL DEFAULT 0",
+            'stop_points': "REAL DEFAULT 10",
+            'trim1_points': "REAL DEFAULT 50",
+            'trim2_points': "REAL DEFAULT 100",
+            'trim1_hit': "BOOLEAN DEFAULT 0",
+            'trim2_hit': "BOOLEAN DEFAULT 0",
+            'breakeven_trades': "INTEGER DEFAULT 0"
+        }
+
+        # Check for 'trims' column removal or rename. We'll simply ignore the old 'trims' column if present
+        # but we must add the new ones.
+        for col_name, col_def in new_columns.items():
+            if col_name not in columns:
+                try:
+                    cur.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # Column might have been added by a parallel process or other means
+
         self.conn.commit()
 
     def insert_session(self, record: SessionRecord) -> int:
         cur = self.conn.cursor()
+        # Calculate trims for backward compatibility (old DB has NOT NULL on trims)
+        trims_count = (1 if record.trim1_hit else 0) + (1 if record.trim2_hit else 0)
         cur.execute(
             """
             INSERT INTO sessions (
-                trade_date, start_time, end_time, instrument, market_regime, notes,
-                gross_pnl, net_pnl, max_drawdown, mfe, mae, trades, wins, losses,
-                win_rate, avg_risk, avg_reward, rr_ratio, trims, largest_win, largest_loss
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trade_date, start_time, end_time, instrument, direction, contracts,
+                entry_price, stop_points, trim1_points, trim2_points, trim1_hit, trim2_hit,
+                market_regime, notes, gross_pnl, net_pnl, max_drawdown, mfe, mae, 
+                trades, wins, losses, breakeven_trades, win_rate, avg_risk, avg_reward, 
+                rr_ratio, trims, largest_win, largest_loss
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.trade_date.isoformat(),
                 record.start_time.isoformat() if record.start_time else "",
                 record.end_time.isoformat() if record.end_time else "",
                 record.instrument,
+                record.direction,
+                record.contracts,
+                record.entry_price,
+                record.stop_points,
+                record.trim1_points,
+                record.trim2_points,
+                record.trim1_hit,
+                record.trim2_hit,
                 record.market_regime,
                 record.notes,
                 record.gross_pnl,
@@ -110,11 +158,12 @@ class Database:
                 record.trades,
                 record.wins,
                 record.losses,
+                record.breakeven_trades,
                 record.win_rate,
                 record.avg_risk,
                 record.avg_reward,
                 record.rr_ratio,
-                record.trims,
+                trims_count,
                 record.largest_win,
                 record.largest_loss,
             ),
@@ -124,12 +173,16 @@ class Database:
 
     def update_session(self, record: SessionRecord) -> None:
         cur = self.conn.cursor()
+        # Calculate trims for backward compatibility
+        trims_count = (1 if record.trim1_hit else 0) + (1 if record.trim2_hit else 0)
         cur.execute(
             """
             UPDATE sessions SET
-                trade_date=?, start_time=?, end_time=?, instrument=?, market_regime=?, notes=?,
-                gross_pnl=?, net_pnl=?, max_drawdown=?, mfe=?, mae=?, trades=?, wins=?, losses=?,
-                win_rate=?, avg_risk=?, avg_reward=?, rr_ratio=?, trims=?, largest_win=?, largest_loss=?
+                trade_date=?, start_time=?, end_time=?, instrument=?, direction=?, contracts=?,
+                entry_price=?, stop_points=?, trim1_points=?, trim2_points=?, trim1_hit=?, trim2_hit=?,
+                market_regime=?, notes=?, gross_pnl=?, net_pnl=?, max_drawdown=?, mfe=?, mae=?, 
+                trades=?, wins=?, losses=?, breakeven_trades=?, win_rate=?, avg_risk=?, avg_reward=?, 
+                rr_ratio=?, trims=?, largest_win=?, largest_loss=?
             WHERE id=?
             """,
             (
@@ -137,6 +190,14 @@ class Database:
                 record.start_time.isoformat() if record.start_time else "",
                 record.end_time.isoformat() if record.end_time else "",
                 record.instrument,
+                record.direction,
+                record.contracts,
+                record.entry_price,
+                record.stop_points,
+                record.trim1_points,
+                record.trim2_points,
+                record.trim1_hit,
+                record.trim2_hit,
                 record.market_regime,
                 record.notes,
                 record.gross_pnl,
@@ -147,11 +208,12 @@ class Database:
                 record.trades,
                 record.wins,
                 record.losses,
+                record.breakeven_trades,
                 record.win_rate,
                 record.avg_risk,
                 record.avg_reward,
                 record.rr_ratio,
-                record.trims,
+                trims_count,
                 record.largest_win,
                 record.largest_loss,
                 record.session_id,

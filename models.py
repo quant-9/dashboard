@@ -12,6 +12,12 @@ class SessionRecord:
     start_time: Optional[time]
     end_time: Optional[time]
     instrument: str
+    direction: str  # "Long" or "Short"
+    contracts: int
+    entry_price: float
+    stop_points: float
+    trim1_points: float
+    trim2_points: float
     market_regime: Optional[str]
     notes: Optional[str]
     gross_pnl: float
@@ -22,11 +28,13 @@ class SessionRecord:
     trades: int
     wins: int
     losses: int
+    breakeven_trades: int
     win_rate: float
     avg_risk: float
     avg_reward: float
     rr_ratio: float
-    trims: int
+    trim1_hit: bool
+    trim2_hit: bool
     largest_win: float
     largest_loss: float
 
