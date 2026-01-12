@@ -65,6 +65,35 @@ class TradeSummary:
 
 
 @dataclass
+class FeeConfig:
+    """Fee configuration per instrument (roundtrip cost per contract)"""
+    mnq_fee: float = 1.00  # $0.50 entry + $0.50 exit
+    mes_fee: float = 1.00
+    mgc_fee: float = 1.00
+    nq_fee: float = 1.75   # E-mini NQ
+    es_fee: float = 2.50   # E-mini S&P
+    gc_fee: float = 2.50   # E-mini Gold
+    default_fee: float = 1.50  # Fallback for unknown instruments
+    
+    def get_fee(self, instrument: str) -> float:
+        """Get the roundtrip fee per contract for a given instrument."""
+        fee_map = {
+            "MNQ": self.mnq_fee,
+            "MES": self.mes_fee,
+            "MGC": self.mgc_fee,
+            "NQ": self.nq_fee,
+            "ES": self.es_fee,
+            "GC": self.gc_fee,
+        }
+        return fee_map.get(instrument.upper(), self.default_fee)
+
+
+@dataclass
 class AppSettings:
     starting_equity: float = 100000.0
     risk_free_rate: float = 0.0
+    fees: FeeConfig = None
+    
+    def __post_init__(self):
+        if self.fees is None:
+            self.fees = FeeConfig()

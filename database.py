@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 import numpy as np
 
-from models import DerivedMetrics, SessionRecord, TradeSummary, AppSettings
+from models import DerivedMetrics, SessionRecord, TradeSummary, AppSettings, FeeConfig
 
 
 class Database:
@@ -313,9 +313,22 @@ class Database:
         cur.execute("SELECT key, value FROM settings")
         rows = cur.fetchall()
         settings_dict = {row['key']: row['value'] for row in rows}
+        
+        # Load fee configuration
+        fee_config = FeeConfig(
+            mnq_fee=settings_dict.get('fee_mnq', 1.00),
+            mes_fee=settings_dict.get('fee_mes', 1.00),
+            mgc_fee=settings_dict.get('fee_mgc', 1.00),
+            nq_fee=settings_dict.get('fee_nq', 1.75),
+            es_fee=settings_dict.get('fee_es', 2.50),
+            gc_fee=settings_dict.get('fee_gc', 2.50),
+            default_fee=settings_dict.get('fee_default', 1.50),
+        )
+        
         return AppSettings(
             starting_equity=settings_dict.get('starting_equity', 100000.0),
-            risk_free_rate=settings_dict.get('risk_free_rate', 0.0)
+            risk_free_rate=settings_dict.get('risk_free_rate', 0.0),
+            fees=fee_config
         )
 
     def save_settings(self, settings: AppSettings) -> None:
@@ -328,6 +341,24 @@ class Database:
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('risk_free_rate', ?)",
             (settings.risk_free_rate,)
         )
+        
+        # Save fee configuration
+        if settings.fees:
+            fee_entries = [
+                ('fee_mnq', settings.fees.mnq_fee),
+                ('fee_mes', settings.fees.mes_fee),
+                ('fee_mgc', settings.fees.mgc_fee),
+                ('fee_nq', settings.fees.nq_fee),
+                ('fee_es', settings.fees.es_fee),
+                ('fee_gc', settings.fees.gc_fee),
+                ('fee_default', settings.fees.default_fee),
+            ]
+            for key, value in fee_entries:
+                cur.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    (key, value)
+                )
+        
         self.conn.commit()
 
     def close(self) -> None:

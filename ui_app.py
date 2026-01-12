@@ -47,7 +47,7 @@ CSV_EXPORT_DEFAULT = "sessions.csv"
 
 from database import Database
 from metrics_engine import MetricsEngine
-from models import DerivedMetrics, SessionRecord, AppSettings
+from models import DerivedMetrics, SessionRecord, AppSettings, FeeConfig
 
 
 
@@ -277,6 +277,7 @@ class SessionForm(QWidget):
             QWidget#InnerForm { background-color: transparent; }
             QLabel { color: #A0A0A0; font-weight: 500; font-size: 12px; }
             QLabel#Header { color: #FFFFFF; font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+            QLabel#SubHeader { color: #888888; font-size: 11px; margin-top: -5px; }
             QPushButton#LogTradeBtn { 
                 background-color: #FFFFFF; 
                 color: #000000; 
@@ -320,11 +321,32 @@ class SessionForm(QWidget):
         dir_layout.addWidget(self.short_radio)
         dir_layout.addStretch()
 
+        # Total contracts
         self.contracts = QSpinBox()
-        self.contracts.setRange(2, 100)
-        self.contracts.setSingleStep(2)
+        self.contracts.setRange(1, 100)
+        self.contracts.setSingleStep(1)
         self.contracts.setValue(2)
         self.contracts.setFixedWidth(140)
+        
+        # Custom trim contract allocation (for uneven splits)
+        trim_contract_layout = QHBoxLayout()
+        self.trim1_contracts = QSpinBox()
+        self.trim1_contracts.setRange(0, 100)
+        self.trim1_contracts.setValue(1)
+        self.trim1_contracts.setFixedWidth(60)
+        self.trim1_contracts.setToolTip("Contracts to exit at Trim 1")
+        
+        self.trim2_contracts = QSpinBox()
+        self.trim2_contracts.setRange(0, 100)
+        self.trim2_contracts.setValue(1)
+        self.trim2_contracts.setFixedWidth(60)
+        self.trim2_contracts.setToolTip("Contracts to exit at Trim 2 (runner)")
+        
+        trim_contract_layout.addWidget(QLabel("T1:"))
+        trim_contract_layout.addWidget(self.trim1_contracts)
+        trim_contract_layout.addWidget(QLabel("T2:"))
+        trim_contract_layout.addWidget(self.trim2_contracts)
+        trim_contract_layout.addStretch()
         
         self.stop_points = QDoubleSpinBox()
         self.stop_points.setRange(0.5, 500.0)
@@ -344,8 +366,10 @@ class SessionForm(QWidget):
         self.result_type = QComboBox()
         self.result_type.addItems([
             "Full TP (Both Trims)", 
-            "Trim 1 + BE (2nd Half)",
-            "Stopped Out (Full Loss)"
+            "Trim 1 + BE (Runner Stopped)",
+            "Trim 1 Only (Partial)",
+            "Stopped Out (Full Loss)",
+            "Custom P&L (Manual Entry)"
         ])
         
         # Calculated Fields
@@ -356,12 +380,13 @@ class SessionForm(QWidget):
         self.gross_pnl.setPrefix("$")
         self.gross_pnl.setFixedWidth(140)
         
+        # Editable fee override (shows calculated but allows editing)
         self.fees_display = QDoubleSpinBox()
-        self.fees_display.setReadOnly(True)
         self.fees_display.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.fees_display.setRange(0.0, 100000.0)
         self.fees_display.setPrefix("$")
         self.fees_display.setFixedWidth(140)
+        self.fees_display.setToolTip("Auto-calculated from settings. Override if needed.")
         
         self.net_pnl = QDoubleSpinBox()
         self.net_pnl.setReadOnly(True)
@@ -369,6 +394,14 @@ class SessionForm(QWidget):
         self.net_pnl.setRange(-1000000.0, 1000000.0)
         self.net_pnl.setPrefix("$")
         self.net_pnl.setFixedWidth(140)
+        
+        # Manual P&L entry field (only visible for Custom P&L option)
+        self.manual_gross_pnl = QDoubleSpinBox()
+        self.manual_gross_pnl.setRange(-1000000.0, 1000000.0)
+        self.manual_gross_pnl.setPrefix("$")
+        self.manual_gross_pnl.setFixedWidth(140)
+        self.manual_gross_pnl.setValue(0.0)
+        self.manual_gross_pnl.setVisible(False)
         
         self.notes = QTextEdit()
         self.notes.setMaximumHeight(80)
@@ -378,23 +411,34 @@ class SessionForm(QWidget):
         form_grid.addRow("Date", self.date)
         form_grid.addRow("Instrument", self.instrument)
         form_grid.addRow("Direction", dir_layout)
-        form_grid.addRow("Contracts", self.contracts)
+        form_grid.addRow("Total Contracts", self.contracts)
+        form_grid.addRow("Trim Split", trim_contract_layout)
         form_grid.addRow("Stop (pts)", self.stop_points)
         form_grid.addRow("Trim 1 (pts)", self.trim1_target)
         form_grid.addRow("Trim 2 (pts)", self.trim2_target)
         form_grid.addRow("Outcome", self.result_type)
+        form_grid.addRow("Manual Gross", self.manual_gross_pnl)
         form_grid.addRow("Gross P&L", self.gross_pnl)
         form_grid.addRow("Fees", self.fees_display)
         form_grid.addRow("Net P&L", self.net_pnl)
         form_grid.addRow("Notes", self.notes)
         
-        # Connect
-        for w in [self.contracts, self.stop_points, self.trim1_target, self.trim2_target, self.instrument]:
+        # Connect signals
+        recalc_widgets = [
+            self.contracts, self.stop_points, self.trim1_target, self.trim2_target,
+            self.trim1_contracts, self.trim2_contracts, self.instrument, self.manual_gross_pnl
+        ]
+        for w in recalc_widgets:
             if isinstance(w, (QDoubleSpinBox, QSpinBox)):
                 w.valueChanged.connect(self._calculate_pnl)
             elif isinstance(w, QComboBox):
                 w.currentTextChanged.connect(self._calculate_pnl)
-        self.result_type.currentTextChanged.connect(self._calculate_pnl)
+                
+        self.result_type.currentTextChanged.connect(self._on_outcome_changed)
+        self.fees_display.valueChanged.connect(self._update_net_pnl)
+        
+        # Sync total contracts with trim splits
+        self.contracts.valueChanged.connect(self._sync_trim_contracts)
 
         # Submit
         submit = QPushButton("Log Trade")
@@ -410,6 +454,27 @@ class SessionForm(QWidget):
         self.setLayout(layout)
         self._calculate_pnl()
 
+    def _sync_trim_contracts(self) -> None:
+        """Auto-distribute contracts between trims when total changes."""
+        total = self.contracts.value()
+        # Default: split evenly (or as close as possible)
+        t1 = total // 2
+        t2 = total - t1
+        self.trim1_contracts.blockSignals(True)
+        self.trim2_contracts.blockSignals(True)
+        self.trim1_contracts.setValue(t1)
+        self.trim2_contracts.setValue(t2)
+        self.trim1_contracts.blockSignals(False)
+        self.trim2_contracts.blockSignals(False)
+        self._calculate_pnl()
+        
+    def _on_outcome_changed(self) -> None:
+        """Show/hide manual P&L entry based on outcome selection."""
+        is_custom = "Custom" in self.result_type.currentText()
+        self.manual_gross_pnl.setVisible(is_custom)
+        self.gross_pnl.setReadOnly(not is_custom)
+        self._calculate_pnl()
+
     # Reuse methods for calculation but adapt colors
     def _get_tick_value(self) -> float:
         instr = self.instrument.currentText()
@@ -422,10 +487,20 @@ class SessionForm(QWidget):
         return 1.0
 
     def _get_fee_per_contract(self) -> float:
+        """Get fee from main window settings if available."""
         instr = self.instrument.currentText()
-        if instr in ["MNQ", "MES", "MGC"]: return 1.90
-        if instr in ["NQ", "ES", "GC"]: return 4.50
-        return 3.80
+        try:
+            # Try to get settings from parent MainWindow
+            if hasattr(self, 'parent') and self.parent() and hasattr(self.parent(), 'settings'):
+                return self.parent().settings.fees.get_fee(instr)
+        except:
+            pass
+        # Fallback defaults (new broker rates)
+        fee_map = {
+            "MNQ": 1.00, "MES": 1.00, "MGC": 1.00,
+            "NQ": 1.75, "ES": 2.50, "GC": 2.50
+        }
+        return fee_map.get(instr, 1.50)
 
     def _calculate_pnl(self) -> None:
         tick_val = self._get_tick_value()
@@ -435,56 +510,48 @@ class SessionForm(QWidget):
         trim2 = self.trim2_target.value()
         outcome = self.result_type.currentText()
         
+        # Use custom trim contract allocation (not necessarily half/half)
+        t1_contracts = self.trim1_contracts.value()
+        t2_contracts = self.trim2_contracts.value()
+        
         gross = 0.0
         
-        # Scaling logic based on contract pairs (assuming even number contracts)
-        # Calculate per "2 contract unit" then scale? Or strictly follow the math for N contracts.
-        # User example: 2 contracts.
-        # Full TP: (Trim1 * 1 + Trim2 * 1) * tick_val
-        # Trim 1 + BE: (Trim1 * 1 + 0 * 1) * tick_val
-        # Stopped Out: -(Stop * 2) * tick_val
-        
-        # Generalize for N contracts (N must be even)
-        half = contracts_num / 2
-        
-        if "Full TP" in outcome: # Outcome 1: Full TP
-            gross = (trim1 * half * tick_val) + (trim2 * half * tick_val)
-        elif "Trim 1 + BE" in outcome: # Outcome 2: Trim 1 + BE
-            gross = (trim1 * half * tick_val) + 0.0 
-        elif "Stopped Out" in outcome: # Outcome 3: Stopped Out
+        if "Custom" in outcome:
+            # Use manual entry
+            gross = self.manual_gross_pnl.value()
+        elif "Full TP" in outcome:
+            # Both trims hit
+            gross = (trim1 * t1_contracts * tick_val) + (trim2 * t2_contracts * tick_val)
+        elif "Trim 1 + BE" in outcome:
+            # Trim 1 hit, runner stopped at breakeven
+            gross = (trim1 * t1_contracts * tick_val) + 0.0
+        elif "Trim 1 Only" in outcome:
+            # Trim 1 hit, no runner (partial exit before T2)
+            gross = (trim1 * t1_contracts * tick_val)
+        elif "Stopped Out" in outcome:
+            # Full stop loss on all contracts
             gross = -(stop * contracts_num * tick_val)
             
         fees = self._get_fee_per_contract() * contracts_num
         net = gross - fees
         
-        # Adjust for specific BE case to exact values if needed?
-        # User: "Stopped at BE which gives a profit of $-1.90".
-        # If Gross BE part is 0, Net is 0 - Fee(1.90).
-        # My calc: Gross = Trim1_Pnl + 0. Net = Gross - Total_Fees.
-        # Total Fees for 2 contracts = 3.80.
-        # Net = Trim1_Pnl - 3.80.
-        # User details: 
-        # Trim 1 (50pts) = $100.
-        # BE part = 0.
-        # Total Fees = 3.80 (1.90 x 2).
-        # Net = 100 - 3.80 = 96.20. matches User Request ($96.20).
-        
-        # Full TP:
-        # Trim 1 (50pts) = $100. Trim 2 (100pts) = $200. Total Gross = $300.
-        # Fees = 3.80.
-        # Net = 300 - 3.80 = 296.20. matches User Request ($296.20).
-        
-        # Stopped Out:
-        # Stop (10pts) = -20pts. 2 contracts = -40pts total?
-        # User says: (10 x 2 x 2) + 3.80 = $43.80 (Loss).
-        # Wait, (10 pts * 2 contracts * $2 tick) = $40.
-        # Plus fees $3.80 = $43.80 Loss (Net PnL = -43.80).
-        # My calc: Gross = -40. Net = -40 - 3.80 = -43.80. Matches.
-        
         self.gross_pnl.setValue(gross)
+        self.fees_display.blockSignals(True)
         self.fees_display.setValue(fees)
+        self.fees_display.blockSignals(False)
         self.net_pnl.setValue(net)
         
+        self._apply_pnl_colors(gross, net)
+
+    def _update_net_pnl(self) -> None:
+        """Called when user manually overrides fees."""
+        gross = self.gross_pnl.value()
+        fees = self.fees_display.value()
+        net = gross - fees
+        self.net_pnl.setValue(net)
+        self._apply_pnl_colors(gross, net)
+        
+    def _apply_pnl_colors(self, gross: float, net: float) -> None:
         # Colors: Green #2E8B57, Red #CD5C5C
         c_green = "#2E8B57"
         c_red = "#CD5C5C"
@@ -494,15 +561,20 @@ class SessionForm(QWidget):
         self.net_pnl.setStyleSheet(f"color: {c_green if net > 0 else c_red if net < 0 else c_neutral}; font-weight: bold; border: none; background: transparent;")
 
     def save_session(self) -> None:
-        # Same logic as before
         try:
             contracts = self.contracts.value()
-            if contracts % 2 != 0:
-                QMessageBox.warning(self, "Invalid Contracts", "Contracts must be an even number.")
+            t1_contracts = self.trim1_contracts.value()
+            t2_contracts = self.trim2_contracts.value()
+            
+            # Validate trim contracts don't exceed total
+            if t1_contracts + t2_contracts > contracts:
+                QMessageBox.warning(self, "Invalid Split", 
+                    f"Trim contracts ({t1_contracts} + {t2_contracts}) exceed total ({contracts}).")
                 return
 
             gross = self.gross_pnl.value()
-            net = self.net_pnl.value()
+            fees = self.fees_display.value()
+            net = gross - fees
             outcome = self.result_type.currentText()
             
             win = 1 if net > 0 else 0
@@ -512,9 +584,10 @@ class SessionForm(QWidget):
             trim1_hit = "Full TP" in outcome or "Trim 1" in outcome
             trim2_hit = "Full TP" in outcome
             
-            risk = self.stop_points.value() * contracts * self._get_tick_value()
-            reward_pot = ((self.trim1_target.value() * (contracts/2)) + 
-                          (self.trim2_target.value() * (contracts/2))) * self._get_tick_value()
+            tick_val = self._get_tick_value()
+            risk = self.stop_points.value() * contracts * tick_val
+            reward_pot = ((self.trim1_target.value() * t1_contracts) + 
+                          (self.trim2_target.value() * t2_contracts)) * tick_val
             
             largest_win = net if win else 0.0
             largest_loss = net if loss else 0.0
@@ -565,7 +638,7 @@ class EditSessionDialog(QDialog):
     def __init__(self, data: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Trade")
-        self.setFixedWidth(400)
+        self.setFixedWidth(450)
         self.data = data
         self.setStyleSheet("""
             QDialog { background-color: #0A0A0A; color: #FFFFFF; }
@@ -606,15 +679,16 @@ class EditSessionDialog(QDialog):
         
         self.instrument = QComboBox()
         self.instrument.addItems(INSTRUMENTS)
-        self.instrument.setCurrentText(self.data.get('instrument', 'NQ'))
+        self.instrument.setCurrentText(self.data.get('instrument', 'MNQ'))
         
         self.direction = QComboBox()
         self.direction.addItems(["Long", "Short"])
         self.direction.setCurrentText(self.data.get('direction', 'Long'))
         
+        # Allow any number of contracts (not just even)
         self.contracts = QSpinBox()
-        self.contracts.setRange(2, 100)
-        self.contracts.setSingleStep(2)
+        self.contracts.setRange(1, 100)
+        self.contracts.setSingleStep(1)
         self.contracts.setValue(self.data.get('contracts', 2))
         
         self.stop_points = QDoubleSpinBox()
@@ -629,6 +703,12 @@ class EditSessionDialog(QDialog):
         self.trim2_points.setRange(1.0, 5000.0)
         self.trim2_points.setValue(self.data.get('trim2_points', 100.0))
         
+        # Gross P&L (editable for custom trades)
+        self.gross_pnl = QDoubleSpinBox()
+        self.gross_pnl.setRange(-1000000.0, 1000000.0)
+        self.gross_pnl.setPrefix("$")
+        self.gross_pnl.setValue(self.data.get('gross_pnl', 0.0))
+        
         self.net_pnl = QDoubleSpinBox()
         self.net_pnl.setRange(-1000000.0, 1000000.0)
         self.net_pnl.setPrefix("$")
@@ -636,15 +716,16 @@ class EditSessionDialog(QDialog):
         
         self.notes = QTextEdit()
         self.notes.setMaximumHeight(60)
-        self.notes.setText(self.data.get('notes', ''))
+        self.notes.setText(self.data.get('notes', '') or '')
         
         form.addRow("Date", self.date)
         form.addRow("Instrument", self.instrument)
         form.addRow("Direction", self.direction)
         form.addRow("Contracts", self.contracts)
         form.addRow("Stop (pts)", self.stop_points)
-        form.addRow("Trim 1", self.trim1_points)
-        form.addRow("Trim 2", self.trim2_points)
+        form.addRow("Trim 1 (pts)", self.trim1_points)
+        form.addRow("Trim 2 (pts)", self.trim2_points)
+        form.addRow("Gross P&L", self.gross_pnl)
         form.addRow("Net P&L", self.net_pnl)
         form.addRow("Notes", self.notes)
         
@@ -666,6 +747,7 @@ class EditSessionDialog(QDialog):
             'stop_points': self.stop_points.value(),
             'trim1_points': self.trim1_points.value(),
             'trim2_points': self.trim2_points.value(),
+            'gross_pnl': self.gross_pnl.value(),
             'net_pnl': self.net_pnl.value(),
             'notes': self.notes.toPlainText(),
             'entry_price': 0.0
@@ -788,7 +870,9 @@ class MainWindow(QWidget):
         self.content_area.addWidget(self.rolling_view)
         
         # 8. Settings
-        self.settings_view = QWidget()
+        self.settings_view = QScrollArea()
+        self.settings_view.setWidgetResizable(True)
+        settings_container = QWidget()
         set_layout = QVBoxLayout()
         set_layout.setContentsMargins(60, 60, 60, 60)
         set_layout.setSpacing(30)
@@ -798,19 +882,96 @@ class MainWindow(QWidget):
         set_header.setStyleSheet("color: #FFFFFF; font-size: 24px; font-weight: 600; margin-bottom: 20px;")
         set_layout.addWidget(set_header)
 
-        # Form
-        settings_form = QWidget()
-        settings_form.setStyleSheet("background-color: #0A0A0A; border-radius: 8px; padding: 20px;")
-        form_layout_inner = QFormLayout()
+        # Portfolio Settings Card
+        portfolio_card = QWidget()
+        portfolio_card.setStyleSheet("background-color: #0A0A0A; border-radius: 8px; padding: 20px;")
+        portfolio_form = QFormLayout()
+        portfolio_form.setSpacing(12)
         
         self.starting_equity_input = QLineEdit(str(self.settings.starting_equity))
         self.starting_equity_input.setFixedWidth(200)
-        form_layout_inner.addRow("Starting Equity ($)", self.starting_equity_input)
+        portfolio_form.addRow("Starting Equity ($)", self.starting_equity_input)
         
-        settings_form.setLayout(form_layout_inner)
-        set_layout.addWidget(settings_form)
+        
+        portfolio_card.setLayout(portfolio_form)
+        
+        portfolio_header = QLabel("Portfolio")
+        portfolio_header.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: 600; margin-bottom: 10px;")
+        set_layout.addWidget(portfolio_header)
+        set_layout.addWidget(portfolio_card)
 
-        save_btn = QPushButton("Save Parameters")
+        # Fee Configuration Card
+        fee_header = QLabel("Commission Fees (Roundtrip per Contract)")
+        fee_header.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: 600; margin-top: 20px; margin-bottom: 10px;")
+        set_layout.addWidget(fee_header)
+        
+        fee_card = QWidget()
+        fee_card.setStyleSheet("background-color: #0A0A0A; border-radius: 8px; padding: 20px;")
+        fee_form = QFormLayout()
+        fee_form.setSpacing(12)
+        
+        # Micro contracts
+        self.fee_mnq_input = QDoubleSpinBox()
+        self.fee_mnq_input.setRange(0.0, 100.0)
+        self.fee_mnq_input.setPrefix("$")
+        self.fee_mnq_input.setDecimals(2)
+        self.fee_mnq_input.setValue(self.settings.fees.mnq_fee)
+        self.fee_mnq_input.setFixedWidth(120)
+        fee_form.addRow("MNQ (Micro Nasdaq)", self.fee_mnq_input)
+        
+        self.fee_mes_input = QDoubleSpinBox()
+        self.fee_mes_input.setRange(0.0, 100.0)
+        self.fee_mes_input.setPrefix("$")
+        self.fee_mes_input.setDecimals(2)
+        self.fee_mes_input.setValue(self.settings.fees.mes_fee)
+        self.fee_mes_input.setFixedWidth(120)
+        fee_form.addRow("MES (Micro S&P)", self.fee_mes_input)
+        
+        self.fee_mgc_input = QDoubleSpinBox()
+        self.fee_mgc_input.setRange(0.0, 100.0)
+        self.fee_mgc_input.setPrefix("$")
+        self.fee_mgc_input.setDecimals(2)
+        self.fee_mgc_input.setValue(self.settings.fees.mgc_fee)
+        self.fee_mgc_input.setFixedWidth(120)
+        fee_form.addRow("MGC (Micro Gold)", self.fee_mgc_input)
+        
+        # E-mini contracts
+        self.fee_nq_input = QDoubleSpinBox()
+        self.fee_nq_input.setRange(0.0, 100.0)
+        self.fee_nq_input.setPrefix("$")
+        self.fee_nq_input.setDecimals(2)
+        self.fee_nq_input.setValue(self.settings.fees.nq_fee)
+        self.fee_nq_input.setFixedWidth(120)
+        fee_form.addRow("NQ (E-mini Nasdaq)", self.fee_nq_input)
+        
+        self.fee_es_input = QDoubleSpinBox()
+        self.fee_es_input.setRange(0.0, 100.0)
+        self.fee_es_input.setPrefix("$")
+        self.fee_es_input.setDecimals(2)
+        self.fee_es_input.setValue(self.settings.fees.es_fee)
+        self.fee_es_input.setFixedWidth(120)
+        fee_form.addRow("ES (E-mini S&P)", self.fee_es_input)
+        
+        self.fee_gc_input = QDoubleSpinBox()
+        self.fee_gc_input.setRange(0.0, 100.0)
+        self.fee_gc_input.setPrefix("$")
+        self.fee_gc_input.setDecimals(2)
+        self.fee_gc_input.setValue(self.settings.fees.gc_fee)
+        self.fee_gc_input.setFixedWidth(120)
+        fee_form.addRow("GC (E-mini Gold)", self.fee_gc_input)
+        
+        self.fee_default_input = QDoubleSpinBox()
+        self.fee_default_input.setRange(0.0, 100.0)
+        self.fee_default_input.setPrefix("$")
+        self.fee_default_input.setDecimals(2)
+        self.fee_default_input.setValue(self.settings.fees.default_fee)
+        self.fee_default_input.setFixedWidth(120)
+        fee_form.addRow("Default (Other)", self.fee_default_input)
+        
+        fee_card.setLayout(fee_form)
+        set_layout.addWidget(fee_card)
+
+        save_btn = QPushButton("Save Settings")
         save_btn.setObjectName("PrimaryBtn")
         save_btn.clicked.connect(self.save_settings)
         save_btn.setFixedWidth(200)
@@ -821,7 +982,7 @@ class MainWindow(QWidget):
         
         # Data Management
         data_header = QLabel("Data Management")
-        data_header.setStyleSheet("color: #FFFFFF; font-size: 18px; font-weight: 600; margin-bottom: 15px;")
+        data_header.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: 600; margin-bottom: 10px;")
         set_layout.addWidget(data_header)
         
         data_controls = QWidget()
@@ -844,7 +1005,8 @@ class MainWindow(QWidget):
         set_layout.addWidget(data_controls)
 
         set_layout.addStretch()
-        self.settings_view.setLayout(set_layout)
+        settings_container.setLayout(set_layout)
+        self.settings_view.setWidget(settings_container)
         self.content_area.addWidget(self.settings_view)
         
         # Map pages
@@ -923,23 +1085,14 @@ class MainWindow(QWidget):
                 loss = 1 if data['net_pnl'] < 0 else 0
                 be = 1 if data['net_pnl'] == 0 else 0
                 
-                # Recalculate risk/reward from edits
-                risk = data['stop_points'] * data['contracts'] * self.form._get_tick_value() # Approximate tick value
-                # Note: This relies on form helper or basic assumption. 
-                # Better to refactor get_tick_value to static or module level if needed precise
-                
-                # Simple fallback for tick value if needed, or assume consistent with form
-                tick_val = 1.0
-                if data['instrument'] == "NQ": tick_val = 20.0
-                elif data['instrument'] == "ES": tick_val = 50.0
-                elif data['instrument'] == "GC": tick_val = 10.0
+                # Tick value lookup
+                tick_map = {
+                    "MNQ": 2.0, "MES": 5.0, "MGC": 1.0,
+                    "NQ": 20.0, "ES": 50.0, "GC": 10.0
+                }
+                tick_val = tick_map.get(data['instrument'], 1.0)
                 
                 risk = data['stop_points'] * data['contracts'] * tick_val
-                # We can't easily recalc trim hit boolean just from PnL, so we keep what was in dialog?
-                # The dialog doesn't return trim_hit booleans in get_data currently? 
-                # Wait, I removed them from get_data return in previous step? 
-                # No, I put 'direction' etc. I should ensure I capture everything needed.
-                # Let's assume the user edits the core numbers and we derive logic or just save it.
                 
                 record = SessionRecord(
                     session_id=session_id,
@@ -953,15 +1106,11 @@ class MainWindow(QWidget):
                     stop_points=data['stop_points'],
                     trim1_points=data['trim1_points'],
                     trim2_points=data['trim2_points'],
-                    # We might need to ask dialog for these or infer them. 
-                    # For now defaulting to False or keeping existing if I passed them through.
-                    # Given I didn't add them to get_data return in the previous step explicitly properly...
-                    # Actually I added core params. Let's act smart:
-                    trim1_hit=False, # TODO: Add to dialog output if critical
-                    trim2_hit=False,
+                    trim1_hit=data['net_pnl'] > 0,  # Infer from result
+                    trim2_hit=data['gross_pnl'] > data['trim1_points'] * tick_val,  # Approximation
                     market_regime=None,
                     notes=data['notes'],
-                    gross_pnl=data['net_pnl'],
+                    gross_pnl=data['gross_pnl'],
                     net_pnl=data['net_pnl'],
                     max_drawdown=0.0,
                     mfe=0.0,
@@ -972,7 +1121,7 @@ class MainWindow(QWidget):
                     breakeven_trades=be,
                     win_rate=1.0 if win else 0.0,
                     avg_risk=risk,
-                    avg_reward=0.0, # Hard to recalc perfectly without trim hits
+                    avg_reward=0.0,
                     rr_ratio=0.0,
                     largest_win=data['net_pnl'] if win else 0.0,
                     largest_loss=data['net_pnl'] if loss else 0.0,
@@ -1113,25 +1262,29 @@ class MainWindow(QWidget):
     def save_settings(self) -> None:
         try:
             starting_equity = float(self.starting_equity_input.text())
-            risk_free_rate = float(self.risk_free_rate_input.text())
             
             if starting_equity <= 0:
                 QMessageBox.warning(self, "Invalid", "Starting equity must be positive.")
                 return
             
-            if risk_free_rate < 0 or risk_free_rate > 100:
-                QMessageBox.warning(self, "Invalid", "Risk-free rate must be between 0 and 100.")
-                return
+            # Update fee configuration
+            fee_config = FeeConfig(
+                mnq_fee=self.fee_mnq_input.value(),
+                mes_fee=self.fee_mes_input.value(),
+                mgc_fee=self.fee_mgc_input.value(),
+                nq_fee=self.fee_nq_input.value(),
+                es_fee=self.fee_es_input.value(),
+                gc_fee=self.fee_gc_input.value(),
+                default_fee=self.fee_default_input.value(),
+            )
             
             self.settings.starting_equity = starting_equity
-            self.settings.risk_free_rate = risk_free_rate / 100  # Convert percentage to decimal
+            self.settings.fees = fee_config
             self.db.save_settings(self.settings)
             
-            # Update metrics engine with new risk-free rate
-            self.metrics = MetricsEngine(risk_free_rate=self.settings.risk_free_rate)
             self.recalculate_all_metrics()
             
-            QMessageBox.information(self, "Saved", "Settings saved. Metrics recalculated.")
+            QMessageBox.information(self, "Saved", "Settings and fees saved. Metrics recalculated.")
         except ValueError:
             QMessageBox.warning(self, "Invalid", "Please enter valid numbers for settings.")
 
